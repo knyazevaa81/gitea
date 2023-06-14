@@ -1,5 +1,5 @@
 #Build stage
-FROM golang:1.19-alpine3.16 AS build-env
+FROM golang:1.19-bullseye AS build-env
 
 ARG GOPROXY
 ENV GOPROXY ${GOPROXY:-direct}
@@ -10,59 +10,65 @@ ENV TAGS "bindata timetzdata $TAGS"
 ARG CGO_EXTRA_CFLAGS
 
 #Build deps
-RUN apk --no-cache add build-base git nodejs npm
+
+RUN curl -sL https://deb.nodesource.com/setup_14.x | bash -
+RUN apt-get -y install gcc g++ libc-dev git nodejs make sqlite3 curl
+RUN npm install -g npm@latest
 
 #Setup repo
 COPY . ${GOPATH}/src/code.gitea.io/gitea
 WORKDIR ${GOPATH}/src/code.gitea.io/gitea
 
 #Checkout version if set
-RUN if [ -n "${GITEA_VERSION}" ]; then git checkout "${GITEA_VERSION}"; fi \
- && make clean-all build
+RUN make clean-all build
 
 # Begin env-to-ini build
 RUN go build contrib/environment-to-ini/environment-to-ini.go
 
-FROM alpine:3.16
+FROM debian:bullseye-slim
 LABEL maintainer="maintainers@gitea.io"
 
-EXPOSE 22 3000
-
-RUN apk --no-cache add \
+RUN apt-get update && apt-get -qy dist-upgrade && apt-get -qy --no-install-recommends install \
     bash \
     ca-certificates \
     curl \
     gettext \
     git \
-    linux-pam \
-    openssh \
+    libpam-modules \
+    openssh-server \
     s6 \
-    sqlite \
-    su-exec \
-    gnupg
+    sqlite3 \
+    gosu \
+    sudo \
+    gnupg \
+    s6 \
+    nodejs \
+    asciidoctor libfreetype6 python3-pip pandoc
 
-RUN addgroup \
-    -S -g 1000 \
-    git && \
-  adduser \
-    -S -H -D \
-    -h /data/git \
-    -s /bin/bash \
-    -u 1000 \
-    -G git \
-    git && \
-  echo "git:*" | chpasswd -e
+RUN groupadd -r -g 1000 git
+RUN useradd -r -M -d /data/git -s /bin/bash -u 1000 -g git git
+RUN echo "git:*" | chpasswd -e
+RUN mkdir -p /var/run/sshd
+
+VOLUME ["/data"]
+
+COPY docker/root /
+
+COPY --from=build-env /go/src/code.gitea.io/gitea/gitea /app/gitea/gitea
+COPY --from=build-env /go/src/code.gitea.io/gitea/environment-to-ini /usr/bin/
+
+RUN chmod 755 /usr/bin/entrypoint /usr/local/bin/gitea /usr/bin/environment-to-ini /etc/s6/gitea/* /etc/s6/openssh/* /etc/s6/.s6-svscan/* /etc/s6/gitea/* /etc/s6/openssh/* /etc/s6/.s6-svscan/* /app/gitea/gitea
+
+RUN pip3 install --upgrade pip && \
+pip3 install -U setuptools && \
+pip3 install --ignore-installed pyzmq && \
+pip3 install -U jupyter docutils nbconvert
+
+RUN apt clean
 
 ENV USER git
 ENV GITEA_CUSTOM /data/gitea
 
-VOLUME ["/data"]
-
+EXPOSE 22 3000
 ENTRYPOINT ["/usr/bin/entrypoint"]
-CMD ["/bin/s6-svscan", "/etc/s6"]
-
-COPY docker/root /
-COPY --from=build-env /go/src/code.gitea.io/gitea/gitea /app/gitea/gitea
-COPY --from=build-env /go/src/code.gitea.io/gitea/environment-to-ini /usr/local/bin/environment-to-ini
-RUN chmod 755 /usr/bin/entrypoint /app/gitea/gitea /usr/local/bin/gitea /usr/local/bin/environment-to-ini
-RUN chmod 755 /etc/s6/gitea/* /etc/s6/openssh/* /etc/s6/.s6-svscan/*
+CMD ["/usr/bin/s6-svscan", "/etc/s6"]
